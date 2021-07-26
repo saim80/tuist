@@ -95,3 +95,5 @@ generated_fixtures
 **/Derived/
 Tuist.xcworkspace
 node_modules
+
+Tuist/Dependencies
