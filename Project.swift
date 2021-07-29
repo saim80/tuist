@@ -13,10 +13,6 @@ func releaseSettings() -> SettingsDictionary {
     return baseSettings
 }
 
-let packages: [Package] = [
-    .package(url: "https://github.com/fortmarek/SwiftGen", .branch("stable")),
-]
-
 func targets() -> [Target] {
     return [
         Target.target(
