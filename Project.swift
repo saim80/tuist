@@ -13,6 +13,10 @@ func releaseSettings() -> SettingsDictionary {
     return baseSettings
 }
 
+let packages: [Package] = [
+    .package(url: "https://github.com/fortmarek/SwiftGen", .branch("stable")),
+]
+
 func targets() -> [Target] {
     return [
         Target.target(
@@ -49,26 +53,26 @@ func targets() -> [Target] {
             name: "TuistSupport",
             hasIntegrationTests: true,
             dependencies: [
-                .external(name: "CombineExt"),
-                .external(name: "SwiftToolsSupport-auto"),
-                .external(name: "RxSwift"),
-                .external(name: "RxRelay"),
-                .external(name: "RxBlocking"),
-                .external(name: "Logging"),
-                .external(name: "KeychainAccess"),
-                .external(name: "Swifter"),
-                .external(name: "Signals"),
-                .external(name: "Zip"),
+                .external(name: "ArgumentParser"),
                 .external(name: "Checksum"),
-                .external(name: "StencilSwiftKit"),
-                .external(name: "SwiftGenKit"),
-                .external(name: "Stencil"),
-                .external(name: "XcodeProj"),
-                .external(name: "Queuer"),
+                .external(name: "CombineExt"),
                 .external(name: "CryptoSwift"),
                 .external(name: "GraphViz"),
-                .external(name: "ArgumentParser"),
+                .external(name: "KeychainAccess"),
+                .external(name: "Logging"),
                 .external(name: "PathKit"),
+                .external(name: "Queuer"),
+                .external(name: "RxBlocking"),
+                .external(name: "RxRelay"),
+                .external(name: "RxSwift"),
+                .external(name: "Signals"),
+                .external(name: "Stencil"),
+                .external(name: "StencilSwiftKit"),
+                .external(name: "SwiftGenKit"),
+                .external(name: "Swifter"),
+                .external(name: "SwiftToolsSupport-auto"),
+                .external(name: "XcodeProj"),
+                .external(name: "Zip"),
             ]
         ),
         Target.module(
