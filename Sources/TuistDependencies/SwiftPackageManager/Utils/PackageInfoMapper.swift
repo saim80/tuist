@@ -478,26 +478,15 @@ extension ProjectDescription.Settings {
         var swiftFlags: [String] = []
 
         if moduleMap.type != .none {
-            headerSearchPaths.append(path.appending(target.relativePublicHeadersPath).pathString)
+            headerSearchPaths.append("$(SRCROOT)/\(target.relativePath.appending(target.relativePublicHeadersPath))")
         }
 
-        headerSearchPaths += target.dependencies
-            .compactMap { dependency in
-                switch dependency {
-                case let .target(name, _), let .byName(name, _):
-                    guard
-                        let dependencyTarget = packageInfo.targets.first(where: { $0.name == name }),
-                        FileHandler.shared.exists(
-                            packageFolder.appending(dependencyTarget.relativePath).appending(dependencyTarget.relativePublicHeadersPath)
-                        )
-                    else {
-                        return nil
-                    }
-                    return "$(SRCROOT)/\(dependencyTarget.relativePath.pathString)/\(dependencyTarget.relativePublicHeadersPath.pathString)"
-                default:
-                    return nil
-                }
-            }
+        let allDependencies = packageInfo.recursiveTargetDependencies(of: target)
+        headerSearchPaths += allDependencies
+            .map { $0.relativePath.appending($0.relativePublicHeadersPath) }
+            .filter { FileHandler.shared.exists(packageFolder.appending($0)) }
+            .map { "$(SRCROOT)/\($0.pathString)" }
+            .sorted()
 
         try settings.forEach { setting in
             if let condition = setting.condition {
@@ -532,35 +521,41 @@ extension ProjectDescription.Settings {
             }
         }
 
-        // FRAMEWORK_SEARCH_PATHS is required for targets depending on system frameworks (for example, XCTest).
-        // SPM always adds it to the Xcode build settings.
         var settingsDictionary: ProjectDescription.SettingsDictionary = [
+            // Xcode settings configured by SPM by default
+            "ALWAYS_SEARCH_USER_PATHS": "YES",
+            "CLANG_ENABLE_OBJC_WEAK": "NO",
             "CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER": "NO",
+            "ENABLE_STRICT_OBJC_MSGSEND": "NO",
             "ENABLE_TESTING_SEARCH_PATHS": "YES",
-            "FRAMEWORK_SEARCH_PATHS": "$(PLATFORM_DIR)/Developer/Library/Frameworks",
+            "FRAMEWORK_SEARCH_PATHS": ["$(inherited)", "$(PLATFORM_DIR)/Developer/Library/Frameworks"],
+            "GCC_NO_COMMON_BLOCKS": "NO",
+            "USE_HEADERMAP": "NO",
+            // Disable warnings in generated projects
+            "GCC_WARN_INHIBIT_ALL_WARNINGS": "YES",
         ]
         if let moduleMapPath = moduleMap.path {
             settingsDictionary["MODULEMAP_FILE"] = .string(moduleMapPath.pathString)
         }
         if !headerSearchPaths.isEmpty {
-            settingsDictionary["HEADER_SEARCH_PATHS"] = .array(headerSearchPaths.map { $0 })
+            settingsDictionary["HEADER_SEARCH_PATHS"] = .array(["$(inherited)"] + headerSearchPaths.map { $0 })
         }
 
         if !defines.isEmpty {
             let sortedDefines = defines.sorted { $0.key < $1.key }
-            settingsDictionary["GCC_PREPROCESSOR_DEFINITIONS"] = .array(sortedDefines.map { key, value in "\(key)=\(value)" })
+            settingsDictionary["GCC_PREPROCESSOR_DEFINITIONS"] = .array(["$(inherited)"] + sortedDefines.map { key, value in "\(key)=\(value)" })
         }
         if !swiftDefines.isEmpty {
-            settingsDictionary["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = .array(swiftDefines)
+            settingsDictionary["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = .array(["$(inherited)"] + swiftDefines)
         }
         if !cFlags.isEmpty {
-            settingsDictionary["OTHER_CFLAGS"] = .array(cFlags)
+            settingsDictionary["OTHER_CFLAGS"] = .array(["$(inherited)"] + cFlags)
         }
         if !cxxFlags.isEmpty {
-            settingsDictionary["OTHER_CPLUSPLUSFLAGS"] = .array(cxxFlags)
+            settingsDictionary["OTHER_CPLUSPLUSFLAGS"] = .array(["$(inherited)"] + cxxFlags)
         }
         if !swiftFlags.isEmpty {
-            settingsDictionary["OTHER_SWIFT_FLAGS"] = .array(swiftFlags)
+            settingsDictionary["OTHER_SWIFT_FLAGS"] = .array(["$(inherited)"] + swiftFlags)
         }
 
         return .init(base: settingsDictionary)
@@ -671,6 +666,23 @@ extension ProjectDescription.DeploymentDevice {
     }
 }
 
+extension PackageInfo {
+    func recursiveTargetDependencies(of target: PackageInfo.Target) -> Set<PackageInfo.Target> {
+        return transitiveClosure(
+            [target],
+            successors: { target in
+                target.dependencies.compactMap { dependency in
+                    switch dependency {
+                    case let .target(name, _), let .byName(name, _):
+                        return self.targets.first(where: { $0.name == name })
+                    default:
+                        return nil
+                    }
+                }
+            }
+        )
+    }
+}
 extension PackageInfo.Target {
     var relativePath: RelativePath {
         RelativePath(path ?? "Sources/\(name)")
