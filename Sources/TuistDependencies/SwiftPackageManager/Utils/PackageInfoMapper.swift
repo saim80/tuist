@@ -41,7 +41,7 @@ enum PackageInfoMapperError: FatalError, Equatable {
         case let .unknownPlatform(platform):
             return "The \(platform) platform is not supported."
         case let .unknownProductDependency(name, package):
-            return "The product \(name) of the package \(package) cannot be found."
+            return "The product \(name) of package \(package) cannot be found."
         case let .unsupportedSetting(tool, setting):
             return "The \(tool) and \(setting) pair is not a supported setting."
         }
@@ -52,6 +52,21 @@ enum PackageInfoMapperError: FatalError, Equatable {
 
 /// Protocol that allows to map a `PackageInfo` to a `ProjectDescription.Project`.
 public protocol PackageInfoMapping {
+    /// Preproces SwiftPackageManager dependencies.
+    /// - Parameters:
+    ///   - packageInfos: All available `PackageInfo`s
+    ///   - productToPackage: Mapping from a product to its package
+    ///   - targetDependencyToFramework: Mapping from a target dependency to its framework
+    /// - Returns: Mapped project
+    func preprocess(
+        packageInfos: [String: PackageInfo],
+        productToPackage: [String: String],
+        targetDependencyToFramework: [String: Path]
+    ) throws -> (
+        targetToProducts: [String: Set<PackageInfo.Product>],
+        resolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]]
+    )
+
     /// Maps a `PackageInfo` to a `ProjectDescription.Project`.
     /// - Parameters:
     ///   - packageInfo: `PackageInfo` to be mapped
@@ -63,7 +78,6 @@ public protocol PackageInfoMapping {
     ///   - deploymentTargets: Configured deployment targets
     ///   - packageToProject: Mapping from a package name to its path
     ///   - productToPackage: Mapping from a product to its package
-    ///   - targetDependencyToFramework: Mapping from a target dependency to its framework
     /// - Returns: Mapped project
     func map(
         packageInfo: PackageInfo,
@@ -73,9 +87,10 @@ public protocol PackageInfoMapping {
         productTypes: [String: TuistGraph.Product],
         platforms: Set<TuistGraph.Platform>,
         deploymentTargets: Set<TuistGraph.DeploymentTarget>,
-        packageToProject: [String: Path],
-        productToPackage: [String: String],
-        targetDependencyToFramework: [String: Path]
+        targetToProducts: [String: Set<PackageInfo.Product>],
+        targetToResolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]],
+        packageToProject: [String: AbsolutePath],
+        productToPackage: [String: String]
     ) throws -> ProjectDescription.Project
 }
 
@@ -86,6 +101,63 @@ public final class PackageInfoMapper: PackageInfoMapping {
         self.moduleMapGenerator = moduleMapGenerator
     }
 
+    /// Resolves all SwiftPackageManager dependencies.
+    /// - Parameters:
+    ///   - packageInfos: All available `PackageInfo`s
+    ///   - productToPackage: Mapping from a product to its package
+    ///   - targetDependencyToFramework: Mapping from a target dependency to its framework
+    /// - Returns: Mapped project
+    public func preprocess(
+        packageInfos: [String: PackageInfo],
+        productToPackage: [String: String],
+        targetDependencyToFramework: [String: Path]
+    ) throws -> (
+        targetToProducts: [String: Set<PackageInfo.Product>],
+        resolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]]
+    ) {
+        let targetToProducts: [String: Set<PackageInfo.Product>] = packageInfos.values.reduce(into: [:]) { result, packageInfo in
+            for product in packageInfo.products {
+                var targetsToProcess = Set(product.targets)
+                while !targetsToProcess.isEmpty {
+                    let target = targetsToProcess.removeFirst()
+                    let alreadyProcessed = result[target]?.contains(product) ?? false
+                    guard !alreadyProcessed else {
+                        continue
+                    }
+                    result[target, default: []].insert(product)
+                    let dependencies = packageInfo.targets.first(where: { $0.name == target })!.dependencies
+                    for dependency in dependencies {
+                        switch dependency {
+                        case let .target(name, _):
+                            targetsToProcess.insert(name)
+                        case let .byName(name, _) where packageInfo.targets.contains(where: { $0.name == name }):
+                            targetsToProcess.insert(name)
+                        case .byName, .product:
+                            continue
+                        }
+                    }
+                }
+            }
+        }
+
+        let resolvedDependencies: [String: [ResolvedDependency]] = try packageInfos.values.reduce(into: [:]) { result, packageInfo in
+            try packageInfo.targets
+                .filter { targetToProducts[$0.name] != nil }
+                .forEach { target in
+                    guard result[target.name] == nil else { return }
+                    result[target.name] = try ResolvedDependency.from(
+                        dependencies: target.dependencies,
+                        packageInfo: packageInfo,
+                        packageInfos: packageInfos,
+                        productToPackage: productToPackage,
+                        targetDependencyToFramework: targetDependencyToFramework
+                    )
+                }
+        }
+
+        return (targetToProducts: targetToProducts, resolvedDependencies: resolvedDependencies)
+    }
+
     public func map(
         packageInfo: PackageInfo,
         packageInfos: [String: PackageInfo],
@@ -94,34 +166,11 @@ public final class PackageInfoMapper: PackageInfoMapping {
         productTypes: [String: TuistGraph.Product],
         platforms: Set<TuistGraph.Platform>,
         deploymentTargets: Set<TuistGraph.DeploymentTarget>,
-        packageToProject: [String: Path],
-        productToPackage: [String: String],
-        targetDependencyToFramework: [String: Path]
+        targetToProducts: [String: Set<PackageInfo.Product>],
+        targetToResolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]],
+        packageToProject: [String: AbsolutePath],
+        productToPackage: [String: String]
     ) throws -> ProjectDescription.Project {
-        var targetToProducts: [String: Set<PackageInfo.Product>] = [:]
-        for product in packageInfo.products {
-            var targetsToProcess = Set(product.targets)
-            while !targetsToProcess.isEmpty {
-                let target = targetsToProcess.removeFirst()
-                let alreadyProcessed = targetToProducts[target]?.contains(product) ?? false
-                guard !alreadyProcessed else {
-                    continue
-                }
-                targetToProducts[target, default: []].insert(product)
-                let dependencies = packageInfo.targets.first(where: { $0.name == target })!.dependencies
-                for dependency in dependencies {
-                    switch dependency {
-                    case let .target(name, _):
-                        targetsToProcess.insert(name)
-                    case let .byName(name, _) where packageInfo.targets.contains(where: { $0.name == name }):
-                        targetsToProcess.insert(name)
-                    case .byName, .product:
-                        continue
-                    }
-                }
-            }
-        }
-
         let targets = try packageInfo.targets.compactMap { target -> ProjectDescription.Target? in
             guard let products = targetToProducts[target.name] else { return nil }
             return try Target.from(
@@ -135,8 +184,8 @@ public final class PackageInfoMapper: PackageInfoMapping {
                 productTypes: productTypes,
                 platforms: platforms,
                 deploymentTargets: deploymentTargets,
+                targetToResolvedDependencies: targetToResolvedDependencies,
                 productToPackage: productToPackage,
-                targetDependencyToFramework: targetDependencyToFramework,
                 moduleMapGenerator: moduleMapGenerator
             )
         }
@@ -158,12 +207,12 @@ extension ProjectDescription.Target {
         packageInfo: PackageInfo,
         packageInfos: [String: PackageInfo],
         packageFolder: AbsolutePath,
-        packageToProject: [String: Path],
+        packageToProject: [String: AbsolutePath],
         productTypes: [String: TuistGraph.Product],
         platforms: Set<TuistGraph.Platform>,
         deploymentTargets: Set<TuistGraph.DeploymentTarget>,
-        productToPackage: [String: String],
-        targetDependencyToFramework: [String: Path],
+        targetToResolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]],
+        productToPackage _: [String: String],
         moduleMapGenerator: SwiftPackageManagerModuleMapGenerating
     ) throws -> Self? {
         guard target.type == .regular else {
@@ -190,21 +239,24 @@ extension ProjectDescription.Target {
         let sources = SourceFilesList.from(sources: target.sources, path: path, excluding: target.exclude)
         let resources = ResourceFileElements.from(resources: target.resources, path: path)
         let headers = try Headers.from(moduleMapType: moduleMap.type, publicHeadersPath: publicHeadersPath)
+
+        let resolvedDependencies = targetToResolvedDependencies[target.name] ?? []
+
         let dependencies = try ProjectDescription.TargetDependency.from(
-            packageInfo: packageInfo,
+            resolvedDependencies: resolvedDependencies,
             platform: platform,
-            packageInfos: packageInfos,
-            dependencies: target.dependencies,
             settings: target.settings,
-            packageToProject: packageToProject,
-            productToPackage: productToPackage,
-            targetDependencyToFramework: targetDependencyToFramework
+            packageToProject: packageToProject
         )
         let settings = try Settings.from(
             target: target,
             packageFolder: packageFolder,
+            packageName: packageName,
             packageInfo: packageInfo,
+            packageInfos: packageInfos,
+            packageToProject: packageToProject,
             path: path,
+            targetToResolvedDependencies: targetToResolvedDependencies,
             settings: target.settings,
             platform: platform,
             moduleMap: moduleMap
@@ -374,51 +426,20 @@ extension ResourceFileElements {
 }
 
 extension ProjectDescription.TargetDependency {
-    // swiftlint:disable:next function_body_length
     fileprivate static func from(
-        packageInfo: PackageInfo,
+        resolvedDependencies: [PackageInfoMapper.ResolvedDependency],
         platform: ProjectDescription.Platform,
-        packageInfos: [String: PackageInfo],
-        dependencies: [PackageInfo.Target.Dependency],
         settings: [PackageInfo.Target.TargetBuildSettingDescription.Setting],
-        packageToProject: [String: Path],
-        productToPackage: [String: String],
-        targetDependencyToFramework: [String: Path]
+        packageToProject: [String: AbsolutePath]
     ) throws -> [Self] {
-        let targetDependencies = try dependencies.flatMap { dependency -> [ProjectDescription.TargetDependency] in
+        let targetDependencies = resolvedDependencies.flatMap { dependency -> [Self] in
             switch dependency {
-            case let .target(name, _):
-                if let framework = targetDependencyToFramework[name] {
-                    return [.xcframework(path: framework)]
-                } else {
-                    return [.target(name: name)]
-                }
-            case let .product(name, package, _):
-                guard
-                    let targets = packageInfos[package]?.products.first(where: { $0.name == name })?.targets,
-                    let projectPath = packageToProject[package]
-                else {
-                    throw PackageInfoMapperError.unknownProductDependency(name, package)
-                }
-                return targets.map { .project(target: $0, path: projectPath) }
-            case let .byName(name, _):
-                if packageInfo.targets.contains(where: { $0.name == name }) {
-                    if let framework = targetDependencyToFramework[name] {
-                        return [.xcframework(path: framework)]
-                    } else {
-                        return [.target(name: name)]
-                    }
-                } else if let package = productToPackage[name] {
-                    guard
-                        let targets = packageInfos[package]?.products.first(where: { $0.name == name })?.targets,
-                        let projectPath = packageToProject[package]
-                    else {
-                        throw PackageInfoMapperError.unknownProductDependency(name, package)
-                    }
-                    return targets.map { .project(target: $0, path: projectPath) }
-                } else {
-                    throw PackageInfoMapperError.unknownByNameDependency(name)
-                }
+            case let .target(name):
+                return [.target(name: name)]
+            case let .xcframework(path):
+                return [.xcframework(path: path)]
+            case let .externalTargets(project, targets):
+                return targets.map { .project(target: $0, path: Path(packageToProject[project]!.pathString)) }
             }
         }
 
@@ -464,8 +485,12 @@ extension ProjectDescription.Settings {
     fileprivate static func from(
         target: PackageInfo.Target,
         packageFolder: AbsolutePath,
+        packageName: String,
         packageInfo: PackageInfo,
-        path: AbsolutePath,
+        packageInfos: [String: PackageInfo],
+        packageToProject: [String: AbsolutePath],
+        path _: AbsolutePath,
+        targetToResolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]],
         settings: [PackageInfo.Target.TargetBuildSettingDescription.Setting],
         platform: ProjectDescription.Platform,
         moduleMap: (type: ModuleMapType, path: AbsolutePath?)
@@ -481,11 +506,20 @@ extension ProjectDescription.Settings {
             headerSearchPaths.append("$(SRCROOT)/\(target.relativePath.appending(target.relativePublicHeadersPath))")
         }
 
-        let allDependencies = packageInfo.recursiveTargetDependencies(of: target)
+        let allDependencies = packageInfo.recursiveTargetDependencies(
+            of: target,
+            package: packageName,
+            packageInfos: packageInfos,
+            targetToResolvedDependencies: targetToResolvedDependencies
+        )
+
         headerSearchPaths += allDependencies
-            .map { $0.relativePath.appending($0.relativePublicHeadersPath) }
-            .filter { FileHandler.shared.exists(packageFolder.appending($0)) }
-            .map { "$(SRCROOT)/\($0.pathString)" }
+            .compactMap { dependency in
+                guard let packagePath = packageToProject[dependency.package] else { return nil }
+                let headersPath = packagePath.appending(dependency.target.relativePath.appending(dependency.target.relativePublicHeadersPath))
+                guard FileHandler.shared.exists(headersPath) else { return nil }
+                return "$(SRCROOT)/\(headersPath.relative(to: packageFolder))"
+            }
             .sorted()
 
         try settings.forEach { setting in
@@ -497,7 +531,7 @@ extension ProjectDescription.Settings {
 
             switch (setting.tool, setting.name) {
             case (.c, .headerSearchPath), (.cxx, .headerSearchPath):
-                headerSearchPaths.append(path.appending(RelativePath(setting.value[0])).pathString)
+                headerSearchPaths.append("$(SRCROOT)/\(target.relativePath.pathString)/\(setting.value[0])")
             case (.c, .define), (.cxx, .define):
                 let (name, value) = setting.extractDefine
                 defines[name] = value
@@ -667,22 +701,38 @@ extension ProjectDescription.DeploymentDevice {
 }
 
 extension PackageInfo {
-    func recursiveTargetDependencies(of target: PackageInfo.Target) -> Set<PackageInfo.Target> {
+    fileprivate struct PackageTarget: Hashable {
+        let package: String
+        let target: PackageInfo.Target
+    }
+
+    fileprivate func recursiveTargetDependencies(
+        of target: PackageInfo.Target,
+        package: String,
+        packageInfos: [String: PackageInfo],
+        targetToResolvedDependencies: [String: [PackageInfoMapper.ResolvedDependency]]
+    ) -> Set<PackageTarget> {
         return transitiveClosure(
-            [target],
-            successors: { target in
-                target.dependencies.compactMap { dependency in
-                    switch dependency {
-                    case let .target(name, _), let .byName(name, _):
-                        return self.targets.first(where: { $0.name == name })
-                    default:
-                        return nil
+            [PackageTarget(package: package, target: target)],
+            successors: { packageTarget in
+                let resolvedDependencies = targetToResolvedDependencies[packageTarget.target.name] ?? []
+                return resolvedDependencies.flatMap { resolvedDependencies -> [PackageTarget] in
+                    switch resolvedDependencies {
+                    case let .target(name):
+                        guard let target = self.targets.first(where: { $0.name == name }) else { return [] }
+                        return [PackageTarget(package: package, target: target)]
+                    case let .externalTargets(package, targets):
+                        guard let packageInfo = packageInfos[package] else { return [] }
+                        return packageInfo.targets.filter { targets.contains($0.name) }.map { PackageTarget(package: package, target: $0) }
+                    case .xcframework:
+                        return []
                     }
                 }
             }
         )
     }
 }
+
 extension PackageInfo.Target {
     var relativePath: RelativePath {
         RelativePath(path ?? "Sources/\(name)")
@@ -690,5 +740,61 @@ extension PackageInfo.Target {
 
     var relativePublicHeadersPath: RelativePath {
         RelativePath(publicHeadersPath ?? "include")
+    }
+}
+
+extension PackageInfoMapper {
+    public enum ResolvedDependency {
+        case target(name: String)
+        case xcframework(path: Path)
+        case externalTargets(package: String, targets: [String])
+
+        fileprivate static func from(
+            dependencies: [PackageInfo.Target.Dependency],
+            packageInfo: PackageInfo,
+            packageInfos: [String: PackageInfo],
+            productToPackage _: [String: String],
+            targetDependencyToFramework: [String: Path]
+        ) throws -> [ResolvedDependency] {
+            return try dependencies.map { dependency -> Self in
+                switch dependency {
+                case let .target(name, _):
+                    return Self.fromTarget(name: name, targetDependencyToFramework: targetDependencyToFramework)
+                case let .product(name, package, _):
+                    return try Self.fromProduct(package: package, product: name, packageInfos: packageInfos)
+                case let .byName(name, _):
+                    if packageInfo.targets.contains(where: { $0.name == name }) {
+                        return Self.fromTarget(name: name, targetDependencyToFramework: targetDependencyToFramework)
+                    } else {
+                        guard let packageNameAndInfo = packageInfos.first(where: { $0.value.products.contains { $0.name == name } }) else {
+                            throw PackageInfoMapperError.unknownByNameDependency(name)
+                        }
+
+                        return try Self.fromProduct(package: packageNameAndInfo.key, product: name, packageInfos: packageInfos)
+                    }
+                }
+            }
+        }
+
+        private static func fromTarget(name: String, targetDependencyToFramework: [String: Path]) -> Self {
+            if let framework = targetDependencyToFramework[name] {
+                return .xcframework(path: framework)
+            } else {
+                return .target(name: name)
+            }
+        }
+
+        private static func fromProduct(
+            package: String,
+            product: String,
+            packageInfos: [String: PackageInfo]
+        ) throws -> Self {
+            guard
+                let targets = packageInfos[package]?.products.first(where: { $0.name == product })?.targets
+            else {
+                throw PackageInfoMapperError.unknownProductDependency(product, package)
+            }
+            return .externalTargets(package: package, targets: targets)
+        }
     }
 }

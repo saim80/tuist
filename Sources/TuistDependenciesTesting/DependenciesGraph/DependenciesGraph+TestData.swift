@@ -74,7 +74,7 @@ public extension TuistCore.DependenciesGraph {
                             ],
                             settings: Self.spmSettings(with: [
                                 "HEADER_SEARCH_PATHS": .array(
-                                    ["/tmp/localPackage/customPath/cSearchPath", "/tmp/localPackage/customPath/cxxSearchPath"]
+                                    ["$(SRCROOT)/customPath/cSearchPath", "$(SRCROOT)/customPath/cxxSearchPath"]
                                 ),
                                 "OTHER_CFLAGS": .array(["CUSTOM_C_FLAG"]),
                                 "OTHER_CPLUSPLUSFLAGS": .array(["CUSTOM_CXX_FLAG"]),
@@ -419,7 +419,7 @@ extension DependenciesGraph {
             "GCC_NO_COMMON_BLOCKS": "NO",
             "USE_HEADERMAP": "NO",
         ]
-        var settingsDictionary = customSettings.merging(defaultSpmSettings, uniquingKeysWith: { custom, spmDefault in custom })
+        var settingsDictionary = customSettings.merging(defaultSpmSettings, uniquingKeysWith: { custom, _ in custom })
 
         if let moduleMap = moduleMap {
             settingsDictionary["MODULEMAP_FILE"] = .string(moduleMap.pathString)
